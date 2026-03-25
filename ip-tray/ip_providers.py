@@ -26,6 +26,7 @@ class IPSnapshot:
     public_ip_dns: str = ""
     vpn_active: bool = False
     vpn_name: str = ""
+    alert_apps: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -151,21 +152,47 @@ def get_local_adapters() -> list[AdapterInfo]:
     return adapters
 
 
-def detect_vpn_processes() -> tuple[bool, str]:
-    """Check running processes for known VPN clients."""
+ALERT_PROCESS_NAMES = {
+    "battle.net.exe": "Battle.net",
+    "discord.exe": "Discord",
+    "steam.exe": "Steam",
+}
+
+
+def _get_tasklist() -> str:
+    """Get tasklist output (cached per snapshot)."""
     try:
-        raw = subprocess.check_output(
+        return subprocess.check_output(
             ["tasklist", "/FO", "CSV", "/NH"],
             text=True, creationflags=0x08000000,
         )
     except Exception:
+        return ""
+
+
+def detect_vpn_processes(tasklist: str) -> tuple[bool, str]:
+    """Check running processes for known VPN clients."""
+    if not tasklist:
         return False, ""
 
-    raw_lower = raw.lower()
+    raw_lower = tasklist.lower()
     for proc, name in VPN_PROCESS_NAMES.items():
         if proc in raw_lower:
             return True, name
     return False, ""
+
+
+def detect_alert_apps(tasklist: str) -> list[str]:
+    """Check for running apps that warrant a warning (e.g. gaming, chat)."""
+    if not tasklist:
+        return []
+
+    raw_lower = tasklist.lower()
+    found = []
+    for proc, name in ALERT_PROCESS_NAMES.items():
+        if proc in raw_lower:
+            found.append(name)
+    return found
 
 
 # --- UPnP IGD (router WAN IP) ---
@@ -317,9 +344,15 @@ def collect_snapshot(skip_upnp: bool = False) -> IPSnapshot:
             snap.vpn_name = a.vpn_type
             break
 
+    # Process checks (single tasklist call)
+    tasklist = _get_tasklist()
+
     # VPN from processes (if not already detected)
     if not snap.vpn_active:
-        snap.vpn_active, snap.vpn_name = detect_vpn_processes()
+        snap.vpn_active, snap.vpn_name = detect_vpn_processes(tasklist)
+
+    # Alert apps
+    snap.alert_apps = detect_alert_apps(tasklist)
 
     # UPnP external IP (skip in fast mode to avoid hammering router)
     if not skip_upnp:

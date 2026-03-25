@@ -294,11 +294,27 @@ class IPWidget:
     )
 
     def _vpn_click(self):
-        """Always open AWS VPN Client and enable fast mode."""
+        """Open AWS VPN Client. If alert apps running and not connected, wiggle instead."""
         import os
+        # If not connected and alert apps are running, wiggle the triangle
+        if not (self.snapshot and self.snapshot.vpn_active):
+            if self.snapshot and self.snapshot.alert_apps:
+                self._wiggle_triangle()
+                return
         if os.path.exists(self.AWS_VPN_LNK):
             os.startfile(self.AWS_VPN_LNK)
         self._enable_fast_mode()
+
+    def _wiggle_triangle(self, count: int = 0):
+        """Animate the status dot with a left-right wiggle."""
+        if count >= 6:
+            # Reset position
+            self.status_dot.grid(padx=(6, 0))
+            return
+        # Alternate left/right offset
+        offset = 3 if count % 2 == 0 else -3
+        self.status_dot.grid(padx=(6 + offset, 0))
+        self.root.after(60, self._wiggle_triangle, count + 1)
 
     # --- Fast mode ---
 
@@ -352,10 +368,17 @@ class IPWidget:
         self.status_dot.delete("all")
         s = self._dot_size
         if self._dot_hovered and self.snapshot and self.snapshot.vpn_active:
-            # Draw X
+            # Draw X for disconnect
             pad = 2
             self.status_dot.create_line(pad, pad, s - pad, s - pad, fill=CHANGED_COLOR, width=1.5)
             self.status_dot.create_line(s - pad, pad, pad, s - pad, fill=CHANGED_COLOR, width=1.5)
+        elif self.snapshot and self.snapshot.alert_apps:
+            # Warning triangle
+            cx = s / 2
+            self.status_dot.create_polygon(
+                cx, 0, s, s, 0, s,
+                outline="#FFCC00", fill="#FFCC00",
+            )
         else:
             self.status_dot.create_oval(1, 1, s - 2, s - 2, fill=color, outline=color)
 
