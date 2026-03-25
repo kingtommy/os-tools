@@ -405,34 +405,12 @@ class IPWidget:
             self._disconnect_vpn()
 
     def _disconnect_vpn(self):
-        """Stop the AWS VPN service (requires UAC elevation) and kill the GUI."""
-        import subprocess
-
-        # Stop the service via elevated PowerShell (triggers UAC prompt)
-        svc_name = "AWS VPN Client OpenVPN Service"
-        ps_cmd = f"Stop-Service '{svc_name}' -Force; Start-Service '{svc_name}'"
-        try:
-            subprocess.Popen(
-                [
-                    "powershell", "-Command",
-                    f"Start-Process powershell -Verb RunAs -WindowStyle Hidden "
-                    f"-ArgumentList '-Command {ps_cmd}'"
-                ],
-                creationflags=0x08000000,
-            )
-        except Exception:
-            pass
-
-        # Kill the GUI
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/IM", "AWSVPNClient.exe"],
-                creationflags=0x08000000,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            pass
+        """Kill the OpenVPN tunnel process (requires UAC) and the GUI."""
+        import os
+        bat_path = os.path.join(os.path.dirname(__file__), "disconnect-vpn.bat")
+        ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", bat_path, None, None, 0  # 0 = SW_HIDE
+        )
 
         # Enable fast mode to track the disconnect
         self._enable_fast_mode()
