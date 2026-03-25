@@ -303,7 +303,7 @@ def get_dns_external_ip(timeout: float = 3.0) -> str:
 
 # --- Full snapshot ---
 
-def collect_snapshot() -> IPSnapshot:
+def collect_snapshot(skip_upnp: bool = False) -> IPSnapshot:
     """Collect all IP information into a snapshot."""
     snap = IPSnapshot()
 
@@ -321,11 +321,12 @@ def collect_snapshot() -> IPSnapshot:
     if not snap.vpn_active:
         snap.vpn_active, snap.vpn_name = detect_vpn_processes()
 
-    # UPnP external IP
-    try:
-        snap.public_ip_upnp = get_upnp_external_ip()
-    except Exception as e:
-        snap.errors.append(f"UPnP: {e}")
+    # UPnP external IP (skip in fast mode to avoid hammering router)
+    if not skip_upnp:
+        try:
+            snap.public_ip_upnp = get_upnp_external_ip()
+        except Exception as e:
+            snap.errors.append(f"UPnP: {e}")
 
     # DNS external IP
     try:
