@@ -74,6 +74,7 @@ class IPWidget:
         self.ip_changed: bool = False
         self.monitors: list[MonitorInfo] = get_monitors()
         self.current_monitor: int = 0  # start on primary
+        self._user_dragged: bool = False
         self._build_ui()
 
     def _build_ui(self):
@@ -98,17 +99,19 @@ class IPWidget:
 
         label_font = tkfont.Font(family=FONT_FAMILY, size=FONT_SIZE - 1)
         value_font = tkfont.Font(family=FONT_FAMILY, size=FONT_SIZE, weight="bold")
-        icon_font = tkfont.Font(family="Segoe UI Symbol", size=FONT_SIZE)
 
         col = 0
 
-        # Monitor cycle button
-        self.monitor_btn = tk.Label(
-            self.inner, text=self._monitor_label(), font=icon_font,
-            fg=LABEL_COLOR, bg=BG_COLOR, cursor="hand2",
+        # Monitor cycle button — canvas-drawn monitor icon with stand
+        self._mon_canvas_w = 24
+        self._mon_canvas_h = 16
+        self.monitor_btn = tk.Canvas(
+            self.inner, width=self._mon_canvas_w, height=self._mon_canvas_h,
+            bg=BG_COLOR, highlightthickness=0, cursor="hand2",
         )
         self.monitor_btn.grid(row=0, column=col, padx=(0, 2))
         self.monitor_btn.bind("<Button-1>", lambda e: self._cycle_monitor())
+        self._draw_monitor_icon()
         col += 1
 
         tk.Frame(self.inner, bg=BORDER_COLOR, width=1).grid(
@@ -183,16 +186,33 @@ class IPWidget:
             fg=OK_COLOR, bg=BG_COLOR,
         )
 
-        # Position near bottom-right (above taskbar)
-        self._position_widget()
-
-        # Start refresh cycle
+        # Start refresh cycle — position after first data arrives
         self._refresh()
 
-    def _monitor_label(self) -> str:
-        """Label for the monitor button: monitor icon + number."""
-        n = self.current_monitor + 1
-        return f"\u25a1 {n}"  # □ + number
+    def _draw_monitor_icon(self):
+        """Draw a small monitor with stand, number to the right."""
+        c = self.monitor_btn
+        cw, ch = self._mon_canvas_w, self._mon_canvas_h
+        c.delete("all")
+
+        color = "#585b70"
+        num = str(self.current_monitor + 1)
+
+        # Screen — small rectangle on the left side
+        sx1, sy1 = 1, 3
+        sx2, sy2 = 14, 13
+        c.create_rectangle(sx1, sy1, sx2, sy2, outline=color, width=1)
+
+        # Neck
+        mid_x = (sx1 + sx2) // 2
+        c.create_line(mid_x, sy2, mid_x, sy2 + 2, fill=color, width=1)
+
+        # Base
+        c.create_line(mid_x - 4, sy2 + 2, mid_x + 4, sy2 + 2, fill=color, width=1)
+
+        # Number to the right of the icon
+        c.create_text(sx2 + 6, (sy1 + sy2) / 2, text=num, fill=LABEL_COLOR,
+                      font=(FONT_FAMILY, FONT_SIZE - 2), anchor="w")
 
     def _cycle_monitor(self):
         """Move widget to the next monitor (1 → 2 → 3 → 1 ...)."""
@@ -200,24 +220,30 @@ class IPWidget:
         if not self.monitors:
             return
         self.current_monitor = (self.current_monitor + 1) % len(self.monitors)
-        self.monitor_btn.config(text=self._monitor_label())
+        self._user_dragged = False
+        self._draw_monitor_icon()
         self._position_widget()
 
     def _position_widget(self):
         """Position widget at bottom-right of current monitor's work area."""
+        # Force full layout pass so sizes are accurate
         self.root.update_idletasks()
 
         if self.monitors and self.current_monitor < len(self.monitors):
             mon = self.monitors[self.current_monitor]
         else:
-            # Fallback — center of screen
             self.root.geometry("+100+100")
             return
 
-        w = self.root.winfo_reqwidth()
-        h = self.root.winfo_reqheight()
+        # Use actual rendered size (more reliable than reqwidth after updates)
+        w = self.root.winfo_width()
+        h = self.root.winfo_height()
+        # Fall back to requested size if window hasn't been mapped yet
+        if w <= 1:
+            w = self.root.winfo_reqwidth()
+        if h <= 1:
+            h = self.root.winfo_reqheight()
 
-        # Place at bottom-right of the work area (excludes taskbar)
         x = mon.work_right - w - 8
         y = mon.work_bottom - h - 4
         self.root.geometry(f"+{x}+{y}")
@@ -232,6 +258,7 @@ class IPWidget:
         x = event.x_root - self._drag_data["x"]
         y = event.y_root - self._drag_data["y"]
         self.root.geometry(f"+{x}+{y}")
+        self._user_dragged = True
 
     # --- Context menu ---
 
@@ -296,6 +323,10 @@ class IPWidget:
 
         self.snapshot = snap
         self._update_display()
+
+        # Reposition after layout settles (labels may have changed width)
+        if not self._user_dragged:
+            self.root.after(50, self._position_widget)
 
         # Schedule next refresh
         self.root.after(REFRESH_INTERVAL_MS, self._refresh)
