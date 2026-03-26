@@ -79,6 +79,11 @@ class IPWidget:
         self._fast_mode_start: float = 0.0
         self._vpn_state_at_fast_start: bool = False
         self._dot_hovered: bool = False
+        self._ports_mode: str = "compact"  # compact | popup
+        self._port_popup: tk.Toplevel | None = None
+        self._port_popup_bg: tk.Frame | None = None  # persistent background
+        self._port_popup_content: tk.Frame | None = None  # swappable content
+        self._show_all_ports: bool = False
         self._build_ui()
 
     def _build_ui(self):
@@ -116,6 +121,18 @@ class IPWidget:
         self.monitor_btn.grid(row=0, column=col, padx=(0, 2))
         self.monitor_btn.bind("<Button-1>", lambda e: self._cycle_monitor())
         self._draw_monitor_icon()
+        col += 1
+
+        # Port widget — compact icon (: + count)
+        self._port_canvas_w = 28
+        self._port_canvas_h = 16
+        self.port_btn = tk.Canvas(
+            self.inner, width=self._port_canvas_w, height=self._port_canvas_h,
+            bg=BG_COLOR, highlightthickness=0, cursor="hand2",
+        )
+        self.port_btn.grid(row=0, column=col, padx=(2, 0))
+        self.port_btn.bind("<Button-1>", lambda e: self._port_click())
+        self._draw_port_icon(0)
         col += 1
 
         tk.Frame(self.inner, bg=BORDER_COLOR, width=1).grid(
@@ -222,6 +239,267 @@ class IPWidget:
         c.create_text(sx2 + 6, (sy1 + sy2) / 2, text=num, fill=LABEL_COLOR,
                       font=(FONT_FAMILY, FONT_SIZE - 2), anchor="w")
 
+    # --- Port widget ---
+
+    def _draw_port_icon(self, count: int):
+        """Draw a stoplight-style icon (two dots in a vertical rectangle) + port count."""
+        c = self.port_btn
+        cw, ch = self._port_canvas_w, self._port_canvas_h
+        c.delete("all")
+
+        color = "#585b70"
+
+        # Vertical rectangle housing
+        rx1, ry1 = 3, 2
+        rx2, ry2 = 11, ch - 2
+        c.create_rectangle(rx1, ry1, rx2, ry2, outline=color, width=1)
+
+        # Two lights (filled circles)
+        cx = (rx1 + rx2) / 2
+        r = 1
+        cy_top = ry1 + (ry2 - ry1) / 3
+        cy_bot = ry1 + 2 * (ry2 - ry1) / 3
+        c.create_oval(cx - r, cy_top - r, cx + r, cy_top + r, fill=color, outline=color)
+        c.create_oval(cx - r, cy_bot - r, cx + r, cy_bot + r, fill=color, outline=color)
+
+        # Count to the right
+        c.create_text(rx2 + 4, ch / 2, text=str(count), fill=LABEL_COLOR,
+                      font=(FONT_FAMILY, FONT_SIZE - 2), anchor="w")
+
+    def _draw_eye_icon(self, canvas, crossed_out: bool = False):
+        """Draw an eye icon, optionally with a strike-through."""
+        canvas.delete("all")
+        color = LABEL_COLOR
+        w, h = 16, 12
+        cx, cy = w / 2, h / 2
+
+        # Eye shape — two bezier-like curves pinched at the ends
+        # Top lid (thicker)
+        points_top = [0, cy, cx * 0.5, cy - 5, cx, cy - 5,
+                      cx * 1.5, cy - 5, w, cy]
+        canvas.create_line(points_top, smooth=True, fill=color, width=1.5)
+        # Bottom lid (thinner)
+        points_bot = [0, cy, cx * 0.5, cy + 4, cx, cy + 4,
+                      cx * 1.5, cy + 4, w, cy]
+        canvas.create_line(points_bot, smooth=True, fill=color, width=1)
+
+        # Pupil
+        r = 1.5
+        canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill=color, outline=color)
+
+        # Strike-through diagonal
+        if crossed_out:
+            canvas.create_line(2, h - 1, w - 2, 1, fill=color, width=1)
+
+    def _toggle_show_all_ports(self):
+        """Toggle filter — only swap the content frame, background stays put."""
+        self._show_all_ports = not self._show_all_ports
+
+        if self._port_popup and self._port_popup.winfo_exists() and self._port_popup_bg:
+            if self._port_popup_content:
+                self._port_popup_content.destroy()
+
+            content = tk.Frame(self._port_popup_bg, bg=BG_COLOR)
+            content.pack(fill="both", expand=True)
+            self._port_popup_content = content
+            self._populate_port_content(content)
+        else:
+            self._show_port_popup()
+
+    def _port_click(self):
+        """Toggle port popup on/off."""
+        if self._ports_mode == "popup":
+            self._close_port_popup()
+            self._ports_mode = "compact"
+        else:
+            self._show_port_popup()
+
+    def _show_port_popup(self):
+        """Create popup window with persistent background, then populate."""
+        if not self.snapshot or not self.snapshot.listening_ports:
+            return
+
+        self._ports_mode = "popup"
+        self._close_port_popup()
+
+        popup = tk.Toplevel(self.root)
+        popup.overrideredirect(True)
+        popup.attributes("-topmost", True)
+        popup.attributes("-alpha", 0.0)
+        popup.configure(bg=BG_COLOR)
+        self._port_popup = popup
+
+        # Fixed-size background frame — never destroyed or resized during toggle
+        POPUP_W = 420
+        POPUP_H = 310
+        self._popup_fixed_w = POPUP_W
+        self._popup_fixed_h = POPUP_H
+
+        bg_frame = tk.Frame(popup, bg=BG_COLOR, width=POPUP_W, height=POPUP_H,
+                            highlightbackground=BORDER_COLOR, highlightthickness=1)
+        bg_frame.pack_propagate(False)  # prevent children from resizing it
+        bg_frame.pack(fill="both", expand=True)
+        self._port_popup_bg = bg_frame
+
+        # Swappable content frame
+        content = tk.Frame(bg_frame, bg=BG_COLOR)
+        content.pack(fill="both", expand=True)
+        self._port_popup_content = content
+        self._populate_port_content(content)
+
+        # Position above the widget, right-aligned
+        root_x = self.root.winfo_x()
+        root_y = self.root.winfo_y()
+        root_w = self.root.winfo_reqwidth()
+        x = root_x + root_w - POPUP_W
+        y = root_y - POPUP_H - 4
+        popup.geometry(f"{POPUP_W}x{POPUP_H}+{x}+{y}")
+
+        self._animate_popup_in(popup, 0.0)
+
+    def _populate_port_content(self, parent):
+        """Fill a frame with port data — header, list, eye toggle."""
+        port_font = tkfont.Font(family=FONT_FAMILY, size=FONT_SIZE - 1)
+        port_font_bold = tkfont.Font(family=FONT_FAMILY, size=FONT_SIZE - 1, weight="bold")
+        header_font = tkfont.Font(family=FONT_FAMILY, size=FONT_SIZE - 1)
+        header_color = LABEL_COLOR
+        dim_color = "#606060"
+        ports = self.snapshot.listening_ports if self.snapshot else []
+
+        inner = tk.Frame(parent, bg=BG_COLOR)
+        inner.pack(padx=8, pady=6, fill="both", expand=True)
+
+        header_frame = tk.Frame(inner, bg=BG_COLOR)
+        header_frame.grid(row=0, column=0, sticky="ew", pady=(0, 2))
+
+        tk.Frame(inner, bg=BORDER_COLOR, height=1).grid(row=1, column=0, sticky="ew")
+
+        list_frame = tk.Frame(inner, bg=BG_COLOR)
+        list_frame.grid(row=2, column=0, sticky="nsew")
+
+        # Let the list frame expand to fill remaining space
+        inner.rowconfigure(2, weight=1)
+        inner.columnconfigure(0, weight=1)
+
+        scrollable = True  # always scrollable in fixed-size popup
+
+        if scrollable:
+            canvas = tk.Canvas(list_frame, bg=BG_COLOR, highlightthickness=0)
+            scrollbar = tk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
+            scroll_inner = tk.Frame(canvas, bg=BG_COLOR)
+            scroll_inner.bind("<Configure>",
+                              lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+            canvas.create_window((0, 0), window=scroll_inner, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+            canvas.pack(side="left", fill="both", expand=True)
+            scrollbar.pack(side="right", fill="y")
+
+            def _on_mousewheel(event):
+                canvas.yview_scroll(-1 * (event.delta // 120), "units")
+
+            canvas.bind("<MouseWheel>", _on_mousewheel)
+            scroll_inner.bind("<MouseWheel>", _on_mousewheel)
+            port_container = scroll_inner
+        else:
+            _on_mousewheel = None
+            port_container = list_frame
+
+        COL_PROCESS = 240
+        COL_BIND = 80
+        COL_PORT = 50
+
+        port_container.columnconfigure(0, minsize=COL_PROCESS)
+        port_container.columnconfigure(1, minsize=COL_BIND)
+        port_container.columnconfigure(2, minsize=COL_PORT)
+
+        http_color = "#5c9aff"
+        visible_ports = ports if self._show_all_ports else [p for p in ports if p.interesting]
+
+        for idx, pi in enumerate(visible_ports):
+            label = pi.label
+            if pi.is_http:
+                name_color = http_color
+                cursor = "hand2"
+            elif pi.container:
+                name_color = "#FFCC00"
+                cursor = "arrow"
+            else:
+                name_color = TEXT_COLOR if label else dim_color
+                cursor = "arrow"
+
+            name_lbl = tk.Label(
+                port_container, text=label or "—", font=port_font,
+                fg=name_color, bg=BG_COLOR, anchor="w", cursor=cursor,
+            )
+            name_lbl.grid(row=idx, column=0, sticky="w", pady=1)
+            if pi.is_http:
+                name_lbl.bind("<Button-1>", lambda e, p=pi.port: self._open_browser(p))
+
+            bind_color = dim_color if pi.local_only else LABEL_COLOR
+            bind_lbl = tk.Label(
+                port_container, text=pi.bind or "", font=port_font,
+                fg=bind_color, bg=BG_COLOR, anchor="w",
+            )
+            bind_lbl.grid(row=idx, column=1, sticky="w", padx=(10, 0), pady=1)
+
+            if pi.is_http:
+                port_lbl = tk.Label(
+                    port_container, text=str(pi.port), font=port_font_bold,
+                    fg=http_color, bg=BG_COLOR, cursor="hand2", anchor="w",
+                )
+                port_lbl.grid(row=idx, column=2, sticky="w", padx=(10, 0), pady=1)
+                port_lbl.bind("<Button-1>", lambda e, p=pi.port: self._open_browser(p))
+            else:
+                port_color = "#FFCC00" if pi.container else TEXT_COLOR
+                port_lbl = tk.Label(
+                    port_container, text=str(pi.port), font=port_font_bold,
+                    fg=port_color, bg=BG_COLOR, cursor="hand2", anchor="w",
+                )
+                port_lbl.grid(row=idx, column=2, sticky="w", padx=(10, 0), pady=1)
+                port_lbl.bind("<Button-1>", lambda e, p=pi.port: self._copy(str(p)))
+
+            if scrollable:
+                for w in [name_lbl, bind_lbl, port_lbl]:
+                    w.bind("<MouseWheel>", _on_mousewheel)
+
+        # Headers
+        header_frame.columnconfigure(0, minsize=COL_PROCESS)
+        header_frame.columnconfigure(1, minsize=COL_BIND)
+        header_frame.columnconfigure(2, minsize=COL_PORT)
+
+        tk.Label(header_frame, text="Process", font=header_font,
+                 fg=header_color, bg=BG_COLOR, anchor="w"
+                 ).grid(row=0, column=0, sticky="w")
+        tk.Label(header_frame, text="Bind", font=header_font,
+                 fg=header_color, bg=BG_COLOR, anchor="w"
+                 ).grid(row=0, column=1, sticky="w", padx=(10, 0))
+        tk.Label(header_frame, text="Port", font=header_font,
+                 fg=header_color, bg=BG_COLOR, anchor="w"
+                 ).grid(row=0, column=2, sticky="w", padx=(10, 0))
+
+        eye_canvas = tk.Canvas(
+            header_frame, width=16, height=12, bg=BG_COLOR,
+            highlightthickness=0, cursor="hand2",
+        )
+        eye_canvas.grid(row=0, column=3, sticky="e", padx=(8, 0))
+        self._draw_eye_icon(eye_canvas, crossed_out=not self._show_all_ports)
+        eye_canvas.bind("<Button-1>", lambda e: self._toggle_show_all_ports())
+
+    def _animate_popup_in(self, popup: tk.Toplevel, alpha: float):
+        """Fade in the popup."""
+        if not popup.winfo_exists():
+            return
+        alpha = min(alpha + 0.15, 0.95)
+        popup.attributes("-alpha", alpha)
+        if alpha < 0.95:
+            self.root.after(20, self._animate_popup_in, popup, alpha)
+
+    def _close_port_popup(self):
+        """Close and destroy the port popup."""
+        if self._port_popup and self._port_popup.winfo_exists():
+            self._port_popup.destroy()
+        self._port_popup = None
+
     def _cycle_monitor(self):
         """Move widget to the next monitor (1 → 2 → 3 → 1 ...)."""
         self.monitors = get_monitors()  # refresh in case monitors changed
@@ -243,14 +521,13 @@ class IPWidget:
             self.root.geometry("+100+100")
             return
 
-        # Use actual rendered size (more reliable than reqwidth after updates)
-        w = self.root.winfo_width()
-        h = self.root.winfo_height()
-        # Fall back to requested size if window hasn't been mapped yet
-        if w <= 1:
-            w = self.root.winfo_reqwidth()
-        if h <= 1:
-            h = self.root.winfo_reqheight()
+        # Use requested size — reflects layout changes immediately after
+        # update_idletasks(), whereas winfo_width() can lag behind on shrink.
+        w = self.root.winfo_reqwidth()
+        h = self.root.winfo_reqheight()
+
+        # Also force the window to adopt the new size
+        self.root.geometry(f"{w}x{h}")
 
         x = mon.work_right - w - 8
         y = mon.work_bottom - h - 4
@@ -362,6 +639,11 @@ class IPWidget:
         self.toast_label.place(relx=0.5, rely=0.5, anchor="center")
         self.root.after(800, lambda: self.toast_label.place_forget())
 
+    def _open_browser(self, port: int):
+        """Open localhost:port in the default browser."""
+        import webbrowser
+        webbrowser.open(f"http://localhost:{port}")
+
     # --- Status dot / disconnect X ---
 
     def _draw_dot(self, color: str):
@@ -468,6 +750,9 @@ class IPWidget:
         else:
             self.pub_tag.config(fg=LABEL_COLOR)
             self.public_label.config(fg=TEXT_COLOR)
+
+        # Port count
+        self._draw_port_icon(len(s.listening_ports))
 
     def run(self):
         self.root.mainloop()

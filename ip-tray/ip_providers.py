@@ -20,6 +20,46 @@ class AdapterInfo:
 
 
 @dataclass
+class PortInfo:
+    port: int
+    bind: str = "0.0.0.0"   # bind address
+    pid: int = 0
+    process: str = ""        # e.g. "mysqld.exe"
+    container: str = ""      # e.g. "my-db" (Docker container name)
+    is_http: bool = False    # responds to HTTP
+
+    @property
+    def label(self) -> str:
+        """Human-readable label for this port."""
+        if self.container:
+            return self.container
+        if self.process:
+            # Strip .exe for cleaner display
+            name = self.process
+            if name.lower().endswith(".exe"):
+                name = name[:-4]
+            return name
+        return ""
+
+    @property
+    def local_only(self) -> bool:
+        return self.bind == "127.0.0.1" or self.bind == "[::1]"
+
+    # Processes worth showing even without a Docker container
+    PROCESS_WHITELIST = {"mysql", "mysqld", "postgres", "node", "wslrelay"}
+
+    @property
+    def interesting(self) -> bool:
+        """Show this port? Docker containers + whitelisted processes."""
+        if self.container:
+            return True
+        if self.process:
+            name = self.process.lower().removesuffix(".exe")
+            return name in self.PROCESS_WHITELIST
+        return False
+
+
+@dataclass
 class IPSnapshot:
     adapters: list[AdapterInfo] = field(default_factory=list)
     public_ip_upnp: str = ""
@@ -27,6 +67,7 @@ class IPSnapshot:
     vpn_active: bool = False
     vpn_name: str = ""
     alert_apps: list[str] = field(default_factory=list)
+    listening_ports: list[PortInfo] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -328,6 +369,156 @@ def get_dns_external_ip(timeout: float = 3.0) -> str:
     return ""
 
 
+# --- Listening ports ---
+
+def _parse_netstat() -> list[tuple[int, str, int]]:
+    """Parse netstat for (port, bind_address, pid) tuples."""
+    try:
+        raw = subprocess.check_output(
+            ["netstat", "-ano", "-p", "TCP"],
+            text=True, creationflags=0x08000000,
+        )
+    except Exception:
+        return []
+
+    results = []
+    seen_ports = set()
+    for line in raw.splitlines():
+        parts = line.split()
+        if len(parts) >= 5 and parts[3] == "LISTENING":
+            addr = parts[1]
+            colon_idx = addr.rfind(":")
+            if colon_idx == -1:
+                continue
+            try:
+                port = int(addr[colon_idx + 1:])
+                pid = int(parts[4])
+            except ValueError:
+                continue
+            if port in seen_ports:
+                continue
+            seen_ports.add(port)
+            bind = addr[:colon_idx]
+            results.append((port, bind, pid))
+    return results
+
+
+def _build_pid_map(tasklist: str) -> dict[int, str]:
+    """Map PID → process name from tasklist CSV output."""
+    pid_map: dict[int, str] = {}
+    for line in tasklist.splitlines():
+        # Format: "name.exe","1234",...
+        parts = line.strip().strip('"').split('","')
+        if len(parts) >= 2:
+            try:
+                pid_map[int(parts[1])] = parts[0]
+            except ValueError:
+                pass
+    return pid_map
+
+
+def _get_docker_port_map() -> dict[int, str]:
+    """Map published port → container name via WSL docker."""
+    port_map: dict[int, str] = {}
+    try:
+        raw = subprocess.check_output(
+            ["wsl", "docker", "ps", "--format", "{{.Names}}\t{{.Ports}}"],
+            text=True, creationflags=0x08000000, timeout=5,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return port_map
+
+    for line in raw.splitlines():
+        if "\t" not in line:
+            continue
+        name, ports_str = line.split("\t", 1)
+        # Ports look like: "0.0.0.0:3306->3306/tcp, 33060/tcp"
+        for chunk in ports_str.split(","):
+            m = re.search(r":(\d+)->", chunk.strip())
+            if m:
+                port_map[int(m.group(1))] = name.strip()
+    return port_map
+
+
+def _probe_http(port: int, timeout: float = 0.3) -> bool:
+    """Quick check if a port responds to HTTP."""
+    try:
+        conn = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+        # Send a minimal HTTP HEAD request
+        conn.sendall(b"HEAD / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+        resp = conn.recv(32)
+        conn.close()
+        return resp.startswith(b"HTTP/")
+    except Exception:
+        return False
+
+
+# Cache of port → is_http results (only probe new ports)
+_http_cache: dict[int, bool] = {}
+
+
+def _probe_interesting_ports(ports: list[PortInfo]):
+    """Probe interesting ports for HTTP in parallel. Uses cache to avoid re-probing."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    interesting = [p for p in ports if p.interesting]
+    if not interesting:
+        return
+
+    # Apply cached results and find ports that need probing
+    to_probe = []
+    for pi in interesting:
+        if pi.port in _http_cache:
+            pi.is_http = _http_cache[pi.port]
+        else:
+            to_probe.append(pi)
+
+    if not to_probe:
+        return
+
+    def _check(pi: PortInfo):
+        pi.is_http = _probe_http(pi.port)
+        _http_cache[pi.port] = pi.is_http
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        pool.map(_check, to_probe)
+
+    # Clean up cache — remove ports that are no longer listening
+    active_ports = {p.port for p in ports}
+    for cached_port in list(_http_cache):
+        if cached_port not in active_ports:
+            del _http_cache[cached_port]
+
+
+def get_listening_ports(tasklist: str) -> list[PortInfo]:
+    """Get enriched list of listening TCP ports."""
+    netstat_data = _parse_netstat()
+    if not netstat_data:
+        return []
+
+    pid_map = _build_pid_map(tasklist)
+    docker_map = _get_docker_port_map()
+
+    ports = []
+    for port, bind, pid in netstat_data:
+        info = PortInfo(
+            port=port,
+            bind=bind,
+            pid=pid,
+            process=pid_map.get(pid, ""),
+            container=docker_map.get(port, ""),
+        )
+        ports.append(info)
+
+    ports.sort(key=lambda p: p.port)
+
+    # Probe interesting ports for HTTP
+    _probe_interesting_ports(ports)
+
+    return ports
+
+
 # --- Full snapshot ---
 
 def collect_snapshot(skip_upnp: bool = False) -> IPSnapshot:
@@ -353,6 +544,9 @@ def collect_snapshot(skip_upnp: bool = False) -> IPSnapshot:
 
     # Alert apps
     snap.alert_apps = detect_alert_apps(tasklist)
+
+    # Listening ports
+    snap.listening_ports = get_listening_ports(tasklist)
 
     # UPnP external IP (skip in fast mode to avoid hammering router)
     if not skip_upnp:
