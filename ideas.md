@@ -7,7 +7,7 @@
 
 ## Awareness widgets (same bar as IP tray)
 - **CPU/RAM/GPU mini-gauge** — tiny bars next to IP widget. Useful for builds, Docker, background game launchers
-- **Port watcher** — shows listening ports, click to expand (IN PROGRESS)
+- ~~**Port watcher** — shows listening ports, click to expand~~ (DONE — built into ip-tray)
 - **Docker status** — running container count, click to see names, click to open logs
 
 ## Productivity

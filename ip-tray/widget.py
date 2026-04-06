@@ -2,10 +2,15 @@
 
 import ctypes
 import ctypes.wintypes
+import os
+import sys
 import threading
 import time
 import tkinter as tk
 from tkinter import font as tkfont
+
+# Ensure sibling modules are importable when run from any working directory.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from ip_providers import IPSnapshot, collect_snapshot
 
